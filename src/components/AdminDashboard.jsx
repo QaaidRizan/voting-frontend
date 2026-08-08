@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
-import { 
-  Search, Bell, LayoutDashboard, Users, UserCheck, 
+import {
+  Search, Bell, LayoutDashboard, Users, UserCheck,
   UserX, Clock, Settings, LogOut, Check, X,
   MoreHorizontal, Vote, FileSpreadsheet, ShieldAlert
 } from 'lucide-react';
 import './AdminDashboard.css';
+import { AdminElections } from './AdminElections';
 
-export function AdminDashboard({ user, onLogout }) {
+export function AdminDashboard({ user, onLogout, onOpenResults }) {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [pendingVoters, setPendingVoters] = useState([]);
   const [approvedVoters, setApprovedVoters] = useState([]);
@@ -17,14 +18,14 @@ export function AdminDashboard({ user, onLogout }) {
 
   const fetchData = async () => {
     try {
-      const headers = { 'x-wallet-address': user.walletAddress };
-      
+      const headers = { 'Authorization': `Bearer ${user.token}` };
+
       const [pendingRes, approvedRes, statsRes] = await Promise.all([
-        fetch(`${baseUrl}/voters/pending`, { headers }),
-        fetch(`${baseUrl}/voters/approved`, { headers }),
-        fetch(`${baseUrl}/voters/stats`, { headers })
+        fetch(`${baseUrl}/api/admin/voters?status=PENDING`, { headers }),
+        fetch(`${baseUrl}/api/admin/voters?status=APPROVED`, { headers }),
+        fetch(`${baseUrl}/api/admin/voters/stats`, { headers })
       ]);
-      
+
       if (pendingRes.ok && approvedRes.ok && statsRes.ok) {
         const pendingData = await pendingRes.json();
         const approvedData = await approvedRes.json();
@@ -44,17 +45,30 @@ export function AdminDashboard({ user, onLogout }) {
     fetchData();
   }, []);
 
-  const handleAction = async (id, action) => {
+  const handleAction = async (walletAddress, action) => {
     try {
-      const res = await fetch(`${baseUrl}/voters/${id}/${action}`, {
-        method: 'PATCH',
-        headers: { 'x-wallet-address': user.walletAddress }
+      let promptReason = '';
+      if (action === 'reject') {
+        promptReason = window.prompt("Please enter a reason for rejection:") || "KYC verification failed.";
+      }
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${user.token}`
+      };
+
+      const body = action === 'reject' ? JSON.stringify({ reason: promptReason }) : undefined;
+
+      const res = await fetch(`${baseUrl}/api/admin/voters/${walletAddress}/${action}`, {
+        method: 'POST',
+        headers,
+        body
       });
       if (res.ok) {
         fetchData(); // refresh lists and stats
       } else {
         const errData = await res.json();
-        setError(`Action failed: ${errData.message}`);
+        setError(`Action failed: ${errData.error || 'Unknown error'}`);
       }
     } catch (err) {
       setError(`Error: ${err.message}`);
@@ -74,21 +88,30 @@ export function AdminDashboard({ user, onLogout }) {
         </div>
 
         <nav className="admin-nav">
-          <button 
+          <button
             className={`admin-nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
             onClick={() => setActiveTab('dashboard')}>
             <LayoutDashboard size={20} /> <span>Dashboard</span>
           </button>
-          <button 
+          <button
             className={`admin-nav-item ${activeTab === 'voters' ? 'active' : ''}`}
             onClick={() => setActiveTab('voters')}>
             <Users size={20} /> <span>Voters</span>
           </button>
-          <button className="admin-nav-item"><UserCheck size={20} /> <span>Candidates</span></button>
-          <button className="admin-nav-item"><Vote size={20} /> <span>Elections</span></button>
-          <button className="admin-nav-item"><FileSpreadsheet size={20} /> <span>Results</span></button>
-          <button className="admin-nav-item"><ShieldAlert size={20} /> <span>Audit Logs</span></button>
-          <button className="admin-nav-item"><Settings size={20} /> <span>Settings</span></button>
+          <button 
+            className={`admin-nav-item ${activeTab === 'elections' ? 'active' : ''}`}
+            onClick={() => setActiveTab('elections')}>
+            <Vote size={20} /> <span>Elections</span>
+          </button>
+          {onOpenResults && (
+            <button
+              className="admin-nav-item"
+              onClick={onOpenResults}
+              type="button"
+            >
+              <FileSpreadsheet size={20} /> <span>Results & Audit</span>
+            </button>
+          )}
         </nav>
 
         <button className="admin-nav-item admin-logout" onClick={onLogout}>
@@ -123,7 +146,7 @@ export function AdminDashboard({ user, onLogout }) {
         {/* Content Area */}
         <div className="admin-content">
           {error && <div style={{ color: '#f44336', background: 'rgba(244, 67, 54, 0.1)', padding: '12px', border: '1px solid #f44336', borderRadius: '8px' }}>{error}</div>}
-          
+
           <div className="admin-header-row">
             <h1>{activeTab === 'dashboard' ? 'Admin Dashboard' : 'Approved Voters'}</h1>
             {activeTab === 'dashboard' && (
@@ -245,18 +268,18 @@ export function AdminDashboard({ user, onLogout }) {
                           </td>
                           <td>
                             <div className="admin-table-actions">
-                              <button 
-                                className="admin-icon-btn" 
+                              <button
+                                className="admin-icon-btn"
                                 title="Approve"
                                 style={{ color: 'var(--text-positive)' }}
-                                onClick={() => handleAction(v.id, 'approve')}>
+                                onClick={() => handleAction(v.walletAddress, 'approve')}>
                                 <Check size={18} />
                               </button>
-                              <button 
-                                className="admin-icon-btn" 
+                              <button
+                                className="admin-icon-btn"
                                 title="Reject"
                                 style={{ color: '#f44336' }}
-                                onClick={() => handleAction(v.id, 'reject')}>
+                                onClick={() => handleAction(v.walletAddress, 'reject')}>
                                 <X size={18} />
                               </button>
                             </div>
@@ -300,11 +323,11 @@ export function AdminDashboard({ user, onLogout }) {
                         </td>
                         <td>
                           <div className="admin-table-actions">
-                            <button 
-                              className="admin-icon-btn" 
+                            <button
+                              className="admin-icon-btn"
                               title="Reject / Revoke"
                               style={{ color: '#f44336' }}
-                              onClick={() => handleAction(v.id, 'reject')}>
+                              onClick={() => handleAction(v.walletAddress, 'reject')}>
                               <X size={18} />
                             </button>
                           </div>
@@ -317,6 +340,9 @@ export function AdminDashboard({ user, onLogout }) {
             </div>
           )}
 
+          {activeTab === 'elections' && (
+            <AdminElections user={user} />
+          )}
         </div>
       </main>
     </div>

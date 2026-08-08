@@ -94,6 +94,22 @@ const Icon = {
       <path d="M12 12c0 3-1 5.5-2 7" />
     </svg>
   ),
+  Calendar: () => (
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '20px', height: '20px' }}>
+      <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+      <line x1="16" y1="2" x2="16" y2="6" />
+      <line x1="8" y1="2" x2="8" y2="6" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+    </svg>
+  ),
+  IdCard: () => (
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '20px', height: '20px' }}>
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <line x1="7" y1="8" x2="17" y2="8" />
+      <line x1="7" y1="12" x2="17" y2="12" />
+      <line x1="7" y1="16" x2="11" y2="16" />
+    </svg>
+  ),
 };
 
 /* ─── Status component ─── */
@@ -109,99 +125,185 @@ function Status({ type, icon, children }) {
 
 /* ═══════════════════════════════════════════════
    TAB 1 — Voter Registration
+   Enforces: Connect -> Nonce -> Sign -> Verify -> Register
 ═══════════════════════════════════════════════ */
 function VoterTab({ onLoginSuccess }) {
   const [voterName, setVoterName] = useState('');
+  const [voterDob, setVoterDob] = useState('');
+  const [voterNationalId, setVoterNationalId] = useState('');
   const [subMode, setSubMode] = useState('register'); // 'register' | 'login'
   const [regStatus, setRegStatus] = useState(null); // { type, text }
   const [loginStatus, setLoginStatus] = useState(null);
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [registeredAddress, setRegisteredAddress] = useState(null);
+  const [loading, setLoading] = useState(false);
 
-  // Use the existing useWallet hook for the register flow
-  const { address, error: walletError, connectWallet } = useWallet();
+  const baseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
 
-  // Separate wallet hook for the "already have a wallet / login" sub-mode
-  const { address: loginAddress, error: loginWalletError, connectWallet: connectLoginWallet } = useWallet();
+  // ── Register flow: Request Nonce -> Sign Nonce -> Verify -> Register ──
+  const handleRegister = async () => {
+    if (!voterName.trim()) {
+      setRegStatus({ type: 'error', text: 'Please enter your full name.' });
+      return;
+    }
+    if (!voterDob.trim()) {
+      setRegStatus({ type: 'error', text: 'Please enter your date of birth.' });
+      return;
+    }
+    if (!voterNationalId.trim()) {
+      setRegStatus({ type: 'error', text: 'Please enter your national ID.' });
+      return;
+    }
+    if (!window.ethereum) {
+      setRegStatus({ type: 'error', text: 'MetaMask not detected. Please install it.' });
+      return;
+    }
 
-  // ── Register flow: connect then POST /voters/register ──
-  useEffect(() => {
-    if (!address) return;
-    if (subMode !== 'register') return;
+    setLoading(true);
+    setRegStatus({ type: 'info', text: 'Connecting wallet…' });
 
-    const register = async () => {
-      if (!voterName.trim()) {
-        setRegStatus({ type: 'error', text: 'Please enter your name before connecting your wallet.' });
-        return;
+    try {
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const accounts = await provider.send('eth_requestAccounts', []);
+      const walletAddress = accounts[0];
+
+      setRegStatus({ type: 'info', text: 'Requesting verification challenge…' });
+      const nonceRes = await fetch(`${baseUrl}/api/auth/nonce`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress }),
+      });
+      if (!nonceRes.ok) {
+        const err = await nonceRes.json();
+        throw new Error(err.error || 'Failed to get nonce.');
       }
-      try {
-        setRegStatus({ type: 'info', text: 'Registering your wallet…' });
-        const baseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
-        const response = await fetch(`${baseUrl}/voters/register`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: voterName.trim(), walletAddress: address }),
-        });
+      const { nonce } = await nonceRes.json();
 
-        if (response.ok) {
-          setRegisteredAddress(address);
-          setRegStatus({ type: 'success', text: 'Wallet registered successfully! Your status is pending review.' });
-        } else if (response.status === 409) {
-          setRegStatus({ type: 'warning', text: 'This wallet is already registered. Use the login option instead.' });
+      setRegStatus({ type: 'info', text: 'Please sign the challenge in MetaMask…' });
+      const signer = await provider.getSigner();
+      const message = `Sign this nonce to authenticate: ${nonce}`;
+      const signature = await signer.signMessage(message);
+
+      setRegStatus({ type: 'info', text: 'Verifying signature & obtaining registration session…' });
+      const verifyRes = await fetch(`${baseUrl}/api/auth/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress, signature }),
+      });
+      if (!verifyRes.ok) {
+        const err = await verifyRes.json();
+        throw new Error(err.error || 'Signature verification failed.');
+      }
+      const { token } = await verifyRes.json();
+
+      setRegStatus({ type: 'info', text: 'Submitting registration & KYC to secure database…' });
+      const regRes = await fetch(`${baseUrl}/api/voters/register`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          walletAddress,
+          kycData: {
+            fullName: voterName.trim(),
+            dateOfBirth: voterDob,
+            nationalId: voterNationalId.trim(),
+            documents: {}
+          }
+        }),
+      });
+
+      if (regRes.ok) {
+        setRegisteredAddress(walletAddress);
+        setRegStatus({ type: 'success', text: 'Wallet registered successfully! Your status is pending review.' });
+      } else {
+        const errData = await regRes.json();
+        if (regRes.status === 409) {
+          setRegStatus({ type: 'warning', text: 'This wallet or national identity is already registered. Please sign in.' });
         } else {
-          const errData = await response.json();
-          setRegStatus({ type: 'error', text: `Registration failed: ${errData.message || 'Unknown error'}` });
+          setRegStatus({ type: 'error', text: `Registration failed: ${errData.error || 'Unknown error'}` });
         }
-      } catch (err) {
-        setRegStatus({ type: 'error', text: `Wallet creation failed — check your connection and try again.` });
       }
-    };
+    } catch (err) {
+      console.error(err);
+      setRegStatus({ type: 'error', text: err.message || 'Registration failed. Please check MetaMask and try again.' });
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    register();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [address]);
+  // ── Login flow: Request Nonce -> Sign Nonce -> Verify -> Fetch User Info ──
+  const handleLogin = async () => {
+    if (!window.ethereum) {
+      setLoginStatus({ type: 'error', text: 'MetaMask not detected. Please install it.' });
+      return;
+    }
 
-  // ── Login flow: connect MetaMask then call /auth/nonce + /auth/verify ──
-  useEffect(() => {
-    if (!loginAddress) return;
-    if (subMode !== 'login') return;
+    setLoading(true);
+    setLoginStatus({ type: 'info', text: 'Connecting wallet…' });
 
-    const login = async () => {
-      try {
-        setLoginStatus({ type: 'info', text: 'Fetching challenge nonce…' });
-        const baseUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
-        const provider = new ethers.BrowserProvider(window.ethereum);
-        const signer = await provider.getSigner();
+    try {
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const accounts = await provider.send('eth_requestAccounts', []);
+      const walletAddress = accounts[0];
 
-        const nonceRes = await fetch(`${baseUrl}/auth/nonce?wallet=${loginAddress}`);
-        const nonceData = await nonceRes.json();
+      setLoginStatus({ type: 'info', text: 'Fetching challenge nonce…' });
+      const nonceRes = await fetch(`${baseUrl}/api/auth/nonce`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress }),
+      });
+      if (!nonceRes.ok) {
+        const err = await nonceRes.json();
+        throw new Error(err.error || 'Failed to get nonce.');
+      }
+      const { nonce } = await nonceRes.json();
 
-        setLoginStatus({ type: 'info', text: 'Please sign the message in MetaMask…' });
-        const signature = await signer.signMessage(nonceData.data);
+      setLoginStatus({ type: 'info', text: 'Please sign the challenge in MetaMask…' });
+      const signer = await provider.getSigner();
+      const message = `Sign this nonce to authenticate: ${nonce}`;
+      const signature = await signer.signMessage(message);
 
-        setLoginStatus({ type: 'info', text: 'Verifying signature…' });
-        const res = await fetch(`${baseUrl}/auth/verify`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ walletAddress: loginAddress, signature }),
+      setLoginStatus({ type: 'info', text: 'Verifying signature…' });
+      const verifyRes = await fetch(`${baseUrl}/api/auth/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress, signature }),
+      });
+      if (!verifyRes.ok) {
+        const err = await verifyRes.json();
+        throw new Error(err.error || 'Signature verification failed.');
+      }
+      const verifyData = await verifyRes.json();
+
+      setLoginStatus({ type: 'info', text: 'Retrieving your profile…' });
+      const meRes = await fetch(`${baseUrl}/api/voters/me`, {
+        headers: { 'Authorization': `Bearer ${verifyData.token}` }
+      });
+      
+      if (meRes.ok) {
+        const meData = await meRes.json();
+        setLoginStatus({ type: 'success', text: 'Verified! Signing you in…' });
+        
+        onLoginSuccess({
+          walletAddress: verifyData.walletAddress,
+          role: verifyData.role.toUpperCase(),
+          name: meData.name,
+          status: meData.status,
+          token: verifyData.token
         });
-
-        if (res.ok) {
-          const user = await res.json();
-          setLoginStatus({ type: 'success', text: 'Verified! Signing you in…' });
-          onLoginSuccess(user);
-        } else {
-          const errData = await res.json();
-          setLoginStatus({ type: 'error', text: `Login failed: ${errData.message || 'Unknown error'}` });
-        }
-      } catch (err) {
-        setLoginStatus({ type: 'error', text: `Error: ${err.message}` });
+      } else {
+        const errData = await meRes.json();
+        throw new Error(errData.error || 'Voter profile not found. Please register first.');
       }
-    };
-
-    login();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loginAddress]);
+    } catch (err) {
+      console.error(err);
+      setLoginStatus({ type: 'error', text: err.message || 'Login failed. Please try again.' });
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleCopy = (text) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -210,16 +312,13 @@ function VoterTab({ onLoginSuccess }) {
     });
   };
 
-  const isRegistering = regStatus?.type === 'info';
-  const isLoggingIn = loginStatus?.type === 'info';
-
   return (
     <div className="vc-step">
       {subMode === 'register' ? (
         <>
           <p className="vc-section-title">Create Your Voter Wallet</p>
           <p className="vc-section-subtitle">
-            Enter your name and connect your MetaMask wallet to register as a voter.
+            Enter your details and sign the MetaMask challenge to register.
           </p>
 
           <div className="vc-field">
@@ -233,22 +332,42 @@ function VoterTab({ onLoginSuccess }) {
                 placeholder="e.g. Alex Johnson"
                 value={voterName}
                 onChange={(e) => setVoterName(e.target.value)}
-                disabled={isRegistering || !!registeredAddress}
+                disabled={loading || !!registeredAddress}
                 autoComplete="name"
               />
             </div>
           </div>
 
-          {walletError && (
-            <Status type="error"><Icon.AlertCircle className="vc-status-icon" />{walletError}</Status>
-          )}
-
-          {address && !registeredAddress && !regStatus && (
-            <div className="vc-connected-badge">
-              <Icon.Check />
-              <span>Connected: {address}</span>
+          <div className="vc-field" style={{ marginTop: '12px' }}>
+            <label className="vc-label" htmlFor="voter-dob">Date of Birth</label>
+            <div className="vc-input-wrap">
+              <Icon.Calendar className="vc-input-icon" />
+              <input
+                id="voter-dob"
+                type="date"
+                className="vc-input"
+                value={voterDob}
+                onChange={(e) => setVoterDob(e.target.value)}
+                disabled={loading || !!registeredAddress}
+              />
             </div>
-          )}
+          </div>
+
+          <div className="vc-field" style={{ marginTop: '12px' }}>
+            <label className="vc-label" htmlFor="voter-national-id">National ID Number</label>
+            <div className="vc-input-wrap">
+              <Icon.IdCard className="vc-input-icon" />
+              <input
+                id="voter-national-id"
+                type="text"
+                className="vc-input"
+                placeholder="e.g. NAT-12345678"
+                value={voterNationalId}
+                onChange={(e) => setVoterNationalId(e.target.value)}
+                disabled={loading || !!registeredAddress}
+              />
+            </div>
+          </div>
 
           {regStatus && <Status type={regStatus.type}>{regStatus.text}</Status>}
 
@@ -275,7 +394,7 @@ function VoterTab({ onLoginSuccess }) {
               </div>
               <div className="vc-receipt-warning">
                 <Icon.AlertTriangle />
-                <p>Save your wallet's recovery phrase in a secure location. It cannot be recovered if lost.</p>
+                <p>Your KYC registration is now pending review by election admins.</p>
               </div>
             </div>
           )}
@@ -284,13 +403,14 @@ function VoterTab({ onLoginSuccess }) {
             <button
               id="voter-connect-btn"
               className="vc-btn-primary"
-              onClick={connectWallet}
-              disabled={isRegistering}
+              onClick={handleRegister}
+              disabled={loading}
+              style={{ marginTop: '16px' }}
             >
-              {isRegistering ? (
-                <><div className="vc-spinner" /> Connecting wallet…</>
+              {loading ? (
+                <><div className="vc-spinner" /> Processing registration…</>
               ) : (
-                <><Icon.Wallet /> Connect Wallet &amp; Register</>
+                <><Icon.Wallet /> Sign &amp; Register Wallet</>
               )}
             </button>
           )}
@@ -303,7 +423,7 @@ function VoterTab({ onLoginSuccess }) {
 
           <div className="vc-link-row">
             <button className="vc-link" onClick={() => { setSubMode('login'); setRegStatus(null); }}>
-              Already have a wallet? Sign in instead →
+              Already registered? Sign in here →
             </button>
           </div>
         </>
@@ -312,29 +432,20 @@ function VoterTab({ onLoginSuccess }) {
         <>
           <p className="vc-section-title">Voter Sign In</p>
           <p className="vc-section-subtitle">
-            Connect your previously registered wallet to verify your identity.
+            Prove ownership of your registered voter wallet via challenge-handshake.
           </p>
-
-          {loginWalletError && <Status type="error">{loginWalletError}</Status>}
-
-          {loginAddress && (
-            <div className="vc-connected-badge">
-              <Icon.Check />
-              <span>Connected: {loginAddress}</span>
-            </div>
-          )}
 
           {loginStatus && <Status type={loginStatus.type}>{loginStatus.text}</Status>}
 
           <button
             id="voter-login-btn"
             className="vc-btn-primary"
-            onClick={connectLoginWallet}
-            disabled={isLoggingIn}
-            style={{ marginTop: '8px' }}
+            onClick={handleLogin}
+            disabled={loading}
+            style={{ marginTop: '16px' }}
           >
-            {isLoggingIn ? (
-              <><div className="vc-spinner" /> Verifying…</>
+            {loading ? (
+              <><div className="vc-spinner" /> Authenticating…</>
             ) : (
               <><Icon.Wallet /> Connect Wallet &amp; Sign In</>
             )}
@@ -353,6 +464,7 @@ function VoterTab({ onLoginSuccess }) {
 
 /* ═══════════════════════════════════════════════
    TAB 2 — Admin Wallet Verification
+   Enforces: Connect -> Nonce -> Sign -> Verify
 ═══════════════════════════════════════════════ */
 function AdminTab({ onLoginSuccess }) {
   const [step, setStep] = useState(1); // 1 = enter address | 2 = sign challenge
@@ -373,14 +485,18 @@ function AdminTab({ onLoginSuccess }) {
     setLoading(true);
     setStatus({ type: 'info', text: 'Fetching challenge from server…' });
     try {
-      const res = await fetch(`${baseUrl}/auth/nonce?wallet=${walletAddr.trim()}`);
+      const res = await fetch(`${baseUrl}/api/auth/nonce`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress: walletAddr.trim() })
+      });
       const data = await res.json();
       if (!res.ok) {
-        setStatus({ type: 'error', text: data.message === 'Not registered as admin' ? "This wallet isn't registered as an admin." : `Error: ${data.message}` });
+        setStatus({ type: 'error', text: data.error || "Failed to fetch challenge." });
         setLoading(false);
         return;
       }
-      setNonce(data.data);
+      setNonce(data.nonce);
       setStatus(null);
       setStep(2);
     } catch (err) {
@@ -393,7 +509,7 @@ function AdminTab({ onLoginSuccess }) {
   // ── MetaMask auto-sign via extension ──
   const handleMetaMaskSign = async () => {
     if (!window.ethereum) {
-      setStatus({ type: 'error', text: 'MetaMask not detected. Please install it or paste your signature manually.' });
+      setStatus({ type: 'error', text: 'MetaMask not detected. Please install it.' });
       return;
     }
     setLoading(true);
@@ -401,7 +517,8 @@ function AdminTab({ onLoginSuccess }) {
     try {
       const provider = new ethers.BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      const sig = await signer.signMessage(nonce);
+      const message = `Sign this nonce to authenticate: ${nonce}`;
+      const sig = await signer.signMessage(message);
       setSignature(sig);
       setStatus({ type: 'success', text: 'Signature captured. Click Verify & Sign In.' });
     } catch (err) {
@@ -420,23 +537,28 @@ function AdminTab({ onLoginSuccess }) {
     setLoading(true);
     setStatus({ type: 'info', text: 'Verifying signature on-chain…' });
     try {
-      const res = await fetch(`${baseUrl}/auth/verify`, {
+      const res = await fetch(`${baseUrl}/api/auth/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ walletAddress: walletAddr.trim(), signature: signature.trim() }),
       });
 
+      const verifyData = await res.json();
       if (res.ok) {
-        const user = await res.json();
         setStatus({ type: 'success', text: 'Signature verified! Signing you in…' });
-        onLoginSuccess(user);
+        
+        // Admin user session object
+        onLoginSuccess({
+          walletAddress: verifyData.walletAddress,
+          role: verifyData.role.toUpperCase(), // 'ADMIN'
+          name: 'Election Admin',
+          token: verifyData.token
+        });
       } else {
-        const errData = await res.json();
-        const msg = errData.message || '';
-        if (msg.toLowerCase().includes('not admin') || msg.toLowerCase().includes('not registered')) {
+        if (verifyData.error?.includes('not admin') || verifyData.error?.includes('allowlist')) {
           setStatus({ type: 'error', text: "This wallet isn't registered as an admin." });
         } else {
-          setStatus({ type: 'error', text: `Signature doesn't match this address. Try again?` });
+          setStatus({ type: 'error', text: verifyData.error || `Signature doesn't match this address. Try again.` });
         }
       }
     } catch (err) {
@@ -502,7 +624,7 @@ function AdminTab({ onLoginSuccess }) {
           {/* Nonce display */}
           <div className="vc-nonce-box">
             <div className="vc-nonce-label">Sign this message</div>
-            <div className="vc-nonce-value">{nonce}</div>
+            <div className="vc-nonce-value">Sign this nonce to authenticate: {nonce}</div>
           </div>
 
           {/* MetaMask quick-sign button */}
@@ -566,7 +688,7 @@ function AdminTab({ onLoginSuccess }) {
 /* ═══════════════════════════════════════════════
    Main Login Page  –  split layout on desktop
 ═══════════════════════════════════════════════ */
-export function Login({ onLoginSuccess }) {
+export function Login({ onLoginSuccess, onOpenResults }) {
   const [activeTab, setActiveTab] = useState('voter');
 
   return (
@@ -701,7 +823,25 @@ export function Login({ onLoginSuccess }) {
           {/* ── Trust footer ── */}
           <footer className="vc-trust">
             Your identity is never stored on-chain. Only your wallet address is public.{' '}
-            <a href="/" aria-label="Back to VoteChain marketing page">Learn more ↗</a>
+            {onOpenResults ? (
+              <button
+                type="button"
+                onClick={onOpenResults}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  color: 'inherit',
+                  textDecoration: 'underline',
+                  cursor: 'pointer',
+                  font: 'inherit',
+                }}
+              >
+                View public results &amp; audit ↗
+              </button>
+            ) : (
+              <a href="/" aria-label="Back to VoteChain marketing page">Learn more ↗</a>
+            )}
           </footer>
 
         </div>
